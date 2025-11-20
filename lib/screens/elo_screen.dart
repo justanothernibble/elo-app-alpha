@@ -187,6 +187,7 @@ class _EloScreenState extends State<EloScreen> with TickerProviderStateMixin {
             ),
           ),
         ),
+      ),
     );
   }
 
