@@ -1,9 +1,8 @@
 # Elo App Implementation Plan
 
 ## Phase 1: Setup & Dependencies
-- [ ] Update pubspec.yaml with required dependencies
-- [ ] Create data models (Item, EloChange, User)
-- [ ] Set up service layer architecture
+- [x] Update pubspec.yaml with required dependencies
+- [x] Create data models (Item, EloChange, User)
 
 ## Phase 2: Core Services
 - [ ] Implement Supabase service integration
