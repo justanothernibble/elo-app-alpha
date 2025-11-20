@@ -3,12 +3,13 @@
 ## Phase 1: Setup & Dependencies
 - [x] Update pubspec.yaml with required dependencies
 - [x] Create data models (Item, EloChange, User)
+- [x] Set up service layer architecture
 
 ## Phase 2: Core Services
-- [ ] Implement Supabase service integration
-- [ ] Create Elo calculation service
-- [ ] Build item management service
-- [ ] Implement change logging system
+- [x] Implement Supabase service integration
+- [x] Create Elo calculation service
+- [x] Build item management service
+- [x] Implement change logging system
 
 ## Phase 3: State Management
 - [ ] Create Provider-based state management
