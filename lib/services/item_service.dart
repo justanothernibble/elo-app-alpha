@@ -4,17 +4,43 @@ import '../models/elo_change.dart';
 import '../services/supabase_service.dart';
 import '../services/elo_service.dart';
 
+/// Simple mutex implementation for thread safety
+class _SimpleLock {
+  bool _isLocked = false;
+
+  Future<T> synchronized<T>(Future<T> Function() operation) async {
+    while (_isLocked) {
+      await Future.delayed(const Duration(milliseconds: 1));
+    }
+
+    _isLocked = true;
+    try {
+      return await operation();
+    } finally {
+      _isLocked = false;
+    }
+  }
+}
+
+/// Thread-safe instance-based ItemService with static API compatibility
 class ItemService {
+  static final ItemService _instance = ItemService._internal();
+  static final _SimpleLock _rankLock = _SimpleLock();
+
+  factory ItemService() => _instance;
+  ItemService._internal();
+
   static const Uuid _uuid = Uuid();
   static const Duration staleDataThreshold = Duration(minutes: 5);
 
-  // Current active pair for comparison
-  static ItemPair? _currentPair;
-  static DateTime _lastPairUpdate = DateTime.now();
-  static bool _isProcessingRanking = false;
+  // Current active pair for comparison (instance state)
+  ItemPair? _currentPair;
+  DateTime _lastPairUpdate = DateTime.now();
+  bool _isProcessingRanking = false;
 
+  /// Instance-based methods for dependency injection
   /// Get a new random pair of items for comparison
-  static Future<ItemPair> getRandomPair({
+  Future<ItemPair> getRandomPair({
     required String category,
     String? subCategory,
     bool forceRefresh = false,
@@ -54,72 +80,77 @@ class ItemService {
     }
   }
 
-  /// Process a user ranking selection
-  static Future<RankingResult> processRanking({
+  /// Process a user ranking selection with mutex protection
+  Future<RankingResult> processRanking({
     required Item selectedItem,
     required Item unselectedItem,
     required String category,
     String? subCategory,
     bool advancedElo = false,
   }) async {
-    if (_isProcessingRanking) {
-      throw Exception('Already processing a ranking. Please wait.');
-    }
+    return _rankLock.synchronized(() async {
+      if (_isProcessingRanking) {
+        throw Exception('Already processing a ranking. Please wait.');
+      }
 
-    _isProcessingRanking = true;
+      _isProcessingRanking = true;
 
-    try {
-      final result = advancedElo
-          ? EloService.calculateEloChangeAdvanced(selectedItem, unselectedItem)
-          : EloService.calculateEloChange(selectedItem, unselectedItem);
+      try {
+        final result = advancedElo
+            ? EloService.calculateEloChangeAdvanced(
+                selectedItem,
+                unselectedItem,
+              )
+            : EloService.calculateEloChange(selectedItem, unselectedItem);
 
-      // Update items in database
-      final updatedWinner = await SupabaseService.updateItemElo(
-        result.winner.id,
-        result.winner.elo,
-      );
+        // Update items in database
+        final updatedWinner = await SupabaseService.updateItemElo(
+          result.winner.id,
+          result.winner.elo,
+        );
 
-      final updatedLoser = await SupabaseService.updateItemElo(
-        result.loser.id,
-        result.loser.elo,
-      );
+        final updatedLoser = await SupabaseService.updateItemElo(
+          result.loser.id,
+          result.loser.elo,
+        );
 
-      // Log changes to database
-      final winnerChange = result.winnerChange.copyWith(id: 0);
-      final loserChange = result.loserChange.copyWith(id: 0);
+        // Log changes to database
+        final winnerChange = result.winnerChange.copyWith(id: 0);
+        final loserChange = result.loserChange.copyWith(id: 0);
 
-      await SupabaseService.logEloChange(winnerChange);
-      await SupabaseService.logEloChange(loserChange);
+        await SupabaseService.logEloChange(winnerChange);
+        await SupabaseService.logEloChange(loserChange);
 
-      // Prepare new pair
-      final newPair = await getRandomPair(
-        category: category,
-        subCategory: subCategory,
-        forceRefresh: true,
-      );
+        // Prepare new pair
+        final newPair = await getRandomPair(
+          category: category,
+          subCategory: subCategory,
+          forceRefresh: true,
+        );
 
-      return RankingResult(
-        selectedItem: updatedWinner,
-        unselectedItem: updatedLoser,
-        eloChange: result.eloChange,
-        newPair: newPair,
-        rankingTime: DateTime.now(),
-      );
-    } catch (e) {
-      throw Exception('Failed to process ranking: $e');
-    } finally {
-      _isProcessingRanking = false;
-    }
+        return RankingResult(
+          selectedItem: updatedWinner,
+          unselectedItem: updatedLoser,
+          eloChange: result.eloChange,
+          newPair: newPair,
+          rankingTime: DateTime.now(),
+        );
+      } catch (e) {
+        throw Exception('Failed to process ranking: $e');
+      } finally {
+        _isProcessingRanking = false;
+      }
+    });
   }
 
   /// Check if current data is stale
-  static bool isCurrentDataStale() {
+  bool isCurrentDataStale() {
     if (_currentPair == null) return true;
     return DateTime.now().difference(_lastPairUpdate) > staleDataThreshold;
   }
 
   /// Get current pair with freshness information
-  static ItemPairInfo getCurrentPairInfo() {
+  ItemPairInfo getCurrentPairInfo() {
     final isStale = isCurrentDataStale();
     final timeSinceUpdate = DateTime.now().difference(_lastPairUpdate);
     final minutesSinceUpdate = timeSinceUpdate.inMinutes;
@@ -136,7 +167,7 @@ class ItemService {
   }
 
   /// Refresh the current pair
-  static Future<ItemPair> refreshCurrentPair() async {
+  Future<ItemPair> refreshCurrentPair() async {
     if (_currentPair == null) {
       throw Exception('No current pair to refresh');
     }
@@ -148,20 +179,26 @@ class ItemService {
     );
   }
 
-  /// Get items by category with pagination
-  static Future<List<Item>> getItems({
+  /// Get items by category with corrected pagination
+  Future<List<Item>> getItems({
     required String category,
     String? subCategory,
     int limit = 50,
     int offset = 0,
   }) async {
     try {
+      // Fixed pagination: Let Supabase handle offset properly
       final items = await SupabaseService.getItemsByCategory(
         category: category,
         subCategory: subCategory,
-        limit: limit,
+        limit: limit + offset, // Get enough items for offset
       );
 
+      if (offset >= items.length) {
+        return []; // Return empty if offset is beyond available items
+      }
+
+      // Apply client-side offset only if necessary
       if (offset > 0) {
         return items.skip(offset).take(limit).toList();
       }
@@ -173,7 +210,7 @@ class ItemService {
   }
 
   /// Get top items in a category
-  static Future<List<Item>> getTopItems({
+  Future<List<Item>> getTopItems({
     required String category,
     String? subCategory,
     int limit = 10,
@@ -194,7 +231,7 @@ class ItemService {
   }
 
   /// Get random item from category for detailed view
-  static Future<Item?> getRandomItemFromCategory({
+  Future<Item?> getRandomItemFromCategory({
     required String category,
     String? subCategory,
   }) async {
@@ -209,7 +246,7 @@ class ItemService {
   }
 
   /// Get Elo change history for an item
-  static Future<List<EloChange>> getItemHistory({
+  Future<List<EloChange>> getItemHistory({
     required int itemId,
     int limit = 10,
   }) async {
@@ -221,7 +258,7 @@ class ItemService {
   }
 
   /// Check if there's enough data for comparison in a category
-  static Future<bool> hasEnoughItems({
+  Future<bool> hasEnoughItems({
     required String category,
     String? subCategory,
     int minimumItems = 2,
@@ -238,20 +275,98 @@ class ItemService {
     }
   }
 
-  /// Generate unique session ID for user
+  /// Generate unique session ID for user (static for compatibility)
   static String generateSessionId() {
     return _uuid.v4();
   }
 
-  /// Get available categories
+  /// Get available categories (static for compatibility)
   static List<String> getAvailableCategories() {
     return SupabaseService.getAvailableCategories();
   }
 
-  /// Get subcategories for a category
+  /// Get subcategories for a category (static for compatibility)
   static List<String> getSubCategories(String category) {
     return SupabaseService.getSubCategories(category);
   }
+
+  // Legacy static API compatibility (delegates to instance)
+  static Future<ItemPair> getRandomPairStatic({
+    required String category,
+    String? subCategory,
+    bool forceRefresh = false,
+  }) => _instance.getRandomPair(
+    category: category,
+    subCategory: subCategory,
+    forceRefresh: forceRefresh,
+  );
+
+  static Future<RankingResult> processRankingStatic({
+    required Item selectedItem,
+    required Item unselectedItem,
+    required String category,
+    String? subCategory,
+    bool advancedElo = false,
+  }) => _instance.processRanking(
+    selectedItem: selectedItem,
+    unselectedItem: unselectedItem,
+    category: category,
+    subCategory: subCategory,
+    advancedElo: advancedElo,
+  );
+
+  static bool isCurrentDataStaleStatic() => _instance.isCurrentDataStale();
+
+  static ItemPairInfo getCurrentPairInfoStatic() =>
+      _instance.getCurrentPairInfo();
+
+  static Future<ItemPair> refreshCurrentPairStatic() =>
+      _instance.refreshCurrentPair();
+
+  static Future<List<Item>> getItemsStatic({
+    required String category,
+    String? subCategory,
+    int limit = 50,
+    int offset = 0,
+  }) => _instance.getItems(
+    category: category,
+    subCategory: subCategory,
+    limit: limit,
+    offset: offset,
+  );
+
+  static Future<List<Item>> getTopItemsStatic({
+    required String category,
+    String? subCategory,
+    int limit = 10,
+  }) => _instance.getTopItems(
+    category: category,
+    subCategory: subCategory,
+    limit: limit,
+  );
+
+  static Future<Item?> getRandomItemFromCategoryStatic({
+    required String category,
+    String? subCategory,
+  }) => _instance.getRandomItemFromCategory(
+    category: category,
+    subCategory: subCategory,
+  );
+
+  static Future<List<EloChange>> getItemHistoryStatic({
+    required int itemId,
+    int limit = 10,
+  }) => _instance.getItemHistory(itemId: itemId, limit: limit);
+
+  static Future<bool> hasEnoughItemsStatic({
+    required String category,
+    String? subCategory,
+    int minimumItems = 2,
+  }) => _instance.hasEnoughItems(
+    category: category,
+    subCategory: subCategory,
+    minimumItems: minimumItems,
+  );
 }
 
 /// Represents a pair of items for comparison
@@ -263,14 +378,14 @@ class ItemPair {
   final DateTime createdAt;
   final String id;
 
-  const ItemPair({
+  ItemPair({
     required this.item1,
     required this.item2,
     required this.category,
     this.subCategory,
     required this.createdAt,
     String? id,
-  }) : id = id ?? const Uuid().v4();
+  }) : id = id ?? Uuid().v4();
 
   List<Item> get items => [item1, item2];
   Item getItem(int index) => items[index];

@@ -1,4 +1,5 @@
 import 'package:flutter/foundation.dart';
+import 'dart:async';
 import '../models/item.dart';
 import '../models/elo_change.dart';
 import '../services/item_service.dart';
@@ -13,6 +14,13 @@ class ItemsProvider extends ChangeNotifier {
   bool _isLoading = false;
   bool _isProcessingRanking = false;
   String? _error;
+
+  // Generic mutex for critical sections
+  final Future<T> Function<T>(Future<T> Function() work) _criticalSection;
+
+  ItemsProvider({Future<T> Function<T>(Future<T> Function())? mutex})
+    : _criticalSection =
+          mutex ?? (<T>(Future<T> Function() work) async => work());
 
   // Getters
   ItemPair? get currentPair => _currentPair;
@@ -33,60 +41,64 @@ class ItemsProvider extends ChangeNotifier {
     String? subCategory,
     bool forceRefresh = false,
   }) async {
-    try {
-      _setLoading(true);
-      _clearError();
+    return _criticalSection(() async {
+      try {
+        _setLoading(true);
+        _clearError();
 
-      final cat = category ?? _selectedCategory;
-      final subCat = subCategory ?? _selectedSubCategory;
+        final cat = category ?? _selectedCategory;
+        final subCat = subCategory ?? _selectedSubCategory;
 
-      final pair = await ItemService.getRandomPair(
-        category: cat,
-        subCategory: subCat,
-        forceRefresh: forceRefresh,
-      );
+        final pair = await ItemService.getRandomPairStatic(
+          category: cat,
+          subCategory: subCat,
+          forceRefresh: forceRefresh,
+        );
 
-      final info = ItemService.getCurrentPairInfo();
+        final info = ItemService.getCurrentPairInfoStatic();
 
-      _currentPair = pair;
-      _pairInfo = info;
-      _selectedCategory = cat;
-      _selectedSubCategory = subCat;
+        _currentPair = pair;
+        _pairInfo = info;
+        _selectedCategory = cat;
+        _selectedSubCategory = subCat;
 
-      _notifyListeners();
-    } catch (e) {
-      _setError('Failed to load item pair: $e');
-    } finally {
-      _setLoading(false);
-    }
+        _notifyListeners();
+      } catch (e) {
+        _setError('Failed to load item pair: $e');
+      } finally {
+        _setLoading(false);
+      }
+    });
   }
 
-  /// Process user ranking selection
+  /// Process user ranking selection - FIXED: Now returns RankingResult?
   Future<RankingResult?> processRanking(int selectedItemIndex) async {
     if (_currentPair == null || _isProcessingRanking) {
       return null;
     }
 
     try {
-      _setProcessingRanking(true);
-      _clearError();
+      return await _criticalSection(() async {
+        _setProcessingRanking(true);
+        _clearError();
 
-      final selectedItem = _currentPair!.items[selectedItemIndex];
-      final unselectedItem = _currentPair!.items[1 - selectedItemIndex];
+        final selectedItem = _currentPair!.items[selectedItemIndex];
+        final unselectedItem = _currentPair!.items[1 - selectedItemIndex];
 
-      final result = await ItemService.processRanking(
-        selectedItem: selectedItem,
-        unselectedItem: unselectedItem,
-        category: _selectedCategory,
-        subCategory: _selectedSubCategory,
-      );
+        final result = await ItemService.processRankingStatic(
+          selectedItem: selectedItem,
+          unselectedItem: unselectedItem,
+          category: _selectedCategory,
+          subCategory: _selectedSubCategory,
+        );
 
-      // Update current pair with new result
-      _currentPair = result.newPair;
-      _pairInfo = ItemService.getCurrentPairInfo();
+        // Update current pair with new result
+        _currentPair = result.newPair;
+        _pairInfo = ItemService.getCurrentPairInfoStatic();
 
-      _notifyListeners();
-      return result;
+        _notifyListeners();
+        return result;
+      });
     } catch (e) {
       _setError('Failed to process ranking: $e');
       return null;
@@ -116,7 +128,7 @@ class ItemsProvider extends ChangeNotifier {
   }) async {
     try {
       final cat = category ?? _selectedCategory;
-      return await ItemService.getItems(
+      return await ItemService.getItemsStatic(
         category: cat,
         subCategory: _selectedSubCategory,
         limit: limit,
@@ -130,7 +142,7 @@ class ItemsProvider extends ChangeNotifier {
   /// Get top items in current category
   Future<List<Item>> getTopItems({int limit = 10}) async {
     try {
-      return await ItemService.getTopItems(
+      return await ItemService.getTopItemsStatic(
         category: _selectedCategory,
         subCategory: _selectedSubCategory,
         limit: limit,
@@ -144,7 +156,10 @@ class ItemsProvider extends ChangeNotifier {
   /// Get item history
   Future<List<EloChange>> getItemHistory(int itemId, {int limit = 10}) async {
     try {
-      return await ItemService.getItemHistory(itemId: itemId, limit: limit);
+      return await ItemService.getItemHistoryStatic(
+        itemId: itemId,
+        limit: limit,
+      );
     } catch (e) {
       _setError('Failed to fetch item history: $e');
       return [];
@@ -164,7 +179,7 @@ class ItemsProvider extends ChangeNotifier {
   /// Check if current category has enough items
   Future<bool> hasEnoughItems({int minimumItems = 2}) async {
     try {
-      return await ItemService.hasEnoughItems(
+      return await ItemService.hasEnoughItemsStatic(
         category: _selectedCategory,
         subCategory: _selectedSubCategory,
         minimumItems: minimumItems,
